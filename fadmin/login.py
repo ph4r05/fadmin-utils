@@ -58,7 +58,7 @@ def main():
     parser.add_argument("--key-file", dest="key_file", default=None,
                         help="password file",)
 
-    parser.add_argument("--timeout", dest="timeout", default=60*60*30,
+    parser.add_argument("--timeout", dest="timeout", default=60*30, type=int,
                         help="Request timeout",)
 
     parser.add_argument("--debug", dest="debug", default=False, action="store_const", const=True,
