@@ -1,5 +1,6 @@
 .idea
 .dist
+dist/
 *.pyc
-*-egg/
+*egg-*/
 venv/
