@@ -5,6 +5,7 @@
 import requests
 import argparse
 import time
+import re
 import logging
 import coloredlogs
 from requests.auth import HTTPBasicAuth
@@ -27,17 +28,34 @@ def entry(args):
 
     elif args.key_ring:
         import keyring
-        kr = keyring.get_keyring()
+        keyring.get_keyring()
         password = keyring.get_password(URL, args.user)
 
     else:
         raise ValueError('Password not specified')
 
     logger.info('Starting authentication loop')
+    s = requests.Session()
     while True:
         try:
-            res = requests.get(URL, auth=HTTPBasicAuth(args.user, password), timeout=30)
+            res = s.get(URL, auth=HTTPBasicAuth(args.user, password), timeout=30)
             logger.debug(res.status_code)
+
+            matches = re.findall(r'"(https://.+?)"', res.text)
+            for m in matches:
+                if 'thetis' not in m:
+                    continue
+
+                if args.no_ipv6 and 'ip6' in m:
+                    continue
+
+                try:
+                    r = s.get(m, timeout=30)
+                    logger.debug('Resp %s to %s' % (r.status_code, m))
+
+                except Exception as e:
+                    logger.warning('Exc: %s' % e)
+
             time.sleep(args.timeout)
 
         except Exception as e:
@@ -62,6 +80,9 @@ def main():
                         help="Request timeout",)
 
     parser.add_argument("--debug", dest="debug", default=False, action="store_const", const=True,
+                        help="Debugging output",)
+
+    parser.add_argument("--no-ipv6", dest="no_ipv6", default=False, action="store_const", const=True,
                         help="Debugging output",)
 
     parser.add_argument("--key-ring", dest="key_ring", default=False, action="store_const", const=True,

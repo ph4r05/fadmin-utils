@@ -6,7 +6,7 @@ import sys
 from setuptools import setup, Command, find_packages
 
 
-version = "0.0.1"
+version = "0.0.2"
 
 # Please update tox.ini when modifying dependency version requirements
 install_requires = [
