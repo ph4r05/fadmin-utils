@@ -13,6 +13,7 @@ install_requires = [
     "coloredlogs",
     "keyring",
     "requests",
+    "multiPing",
 ]
 
 dev_extras = [
