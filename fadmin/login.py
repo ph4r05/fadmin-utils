@@ -13,6 +13,8 @@ import threading
 from multiping import MultiPing
 from requests.auth import HTTPBasicAuth
 from fadmin.trace_logger import Tracelogger
+from fadmin import shell_ping
+
 
 logger = logging.getLogger(__name__)
 coloredlogs.CHROOT_FILES = []
@@ -40,6 +42,8 @@ class Login(object):
         self.result_window = [[], []]
         self.window_length = 100
         self.monitored = [FADMIN_HOST, MUNI_HOST]
+        self.last_connectivity_state = None
+        self.last_check = 0
 
     def ping_main(self, monitored_host):
         """
@@ -68,7 +72,7 @@ class Login(object):
 
         logger.info('Ping loop %s terminated' % monitored_host)
 
-    def ping_job(self, monitored_host, attempts=3, timeout=1):
+    def ping_job(self, monitored_host, attempts=1, timeout=1):
         """
         Ping diagnosis
         :param monitored_host:
@@ -76,33 +80,36 @@ class Login(object):
         :param timeout:
         :return:
         """
-        mp = MultiPing([self.monitored[monitored_host]])
-        mp.send()
+        r = shell_ping.ping(self.monitored[monitored_host], attempts)
+        ip, time_min, time_avg, time_max, lost = r
 
-        # With a 1 second timeout, wait for responses (may return sooner if all results are received).
-        responses, no_responses = mp.receive(timeout)
-        succ_rtt = None
+        logger.info('Pinging %s res: %s' % (self.monitored[monitored_host], r))
 
-        for addr, rtt in responses.items():
-            succ_rtt = succ_rtt if rtt is None else min(succ_rtt, rtt)
+        # if monitored_host==0:
+        #     succ_rtt = 1
+        # else:
+        succ_rtt = None if lost >= 100 else time_min
 
         self.result_window[monitored_host].append(succ_rtt)
         if len(self.result_window[monitored_host]) > self.window_length:
             self.result_window[monitored_host].pop(0)
 
     def has_enough_data(self):
-        return len(self.result_window[0]) > 3
+        return len(self.result_window[0]) > 4
 
     def is_on_fi(self):
-        suffix = self.result_window[0][-3:]
-        return sum([1 for x in suffix if x is not None]) >= 2  # At least 2 in 3 last measurements
+        suffix = self.result_window[0][-4:]
+        return sum([1 for x in suffix if x is not None]) >= 2
 
     def is_world_pingable(self):
-        suffix = self.result_window[1][-3:]
-        return sum([1 for x in suffix if x is not None]) >= 2  # At least 2 in 3 last measurements
+        suffix = self.result_window[1][-4:]
+        return sum([1 for x in suffix if x is not None]) >= 2
 
-    def prune_attempts(self):
-        self.auth_attempts = self.auth_attempts[-100:]  # keep last 100 records
+    def prune_attempts(self, state_changed=False):
+        if state_changed:
+            self.auth_attempts = self.auth_attempts[-10:]
+        else:
+            self.auth_attempts = self.auth_attempts[-100:]  # keep last 100 records
 
     def last_auths_in(self, num, span):
         last = self.auth_attempts[-num:]
@@ -111,36 +118,72 @@ class Login(object):
 
         return sum([1 for x in last if x[0] > span]) == num
 
+    def curr_connectivity_state(self):
+        state = 0
+        if self.is_on_fi():
+            state |= 1
+        if self.is_world_pingable():
+            state |= 2
+        return state
+
     def reauth_target(self):
         if len(self.auth_attempts) == 0:
             return 0
 
-        cur_time = time.time()
         last = self.auth_attempts[-1]
+        cur_time = time.time()
+
+        if cur_time - last[0] < 1.:
+            return cur_time + 10
+        if cur_time - self.last_check < 1.:
+            return cur_time + 10
+
+        cur_state = self.curr_connectivity_state()
+        if cur_state != self.last_connectivity_state:
+            self.prune_attempts(True)
+
+        logger.debug('Last: %s diff %s, cur state: %s, last state: %s'
+                     % (last, cur_time-last[0], cur_state, self.last_connectivity_state))
+
+        self.last_connectivity_state = cur_state
+        self.last_check = cur_time
 
         # World is not pingable, get time to start auth.
         if not self.is_world_pingable():
             # If last 20 auths were within 5 minute, slow down to 5 minutes
-            if self.last_auths_in(20, cur_time - 5 * 60):
-                return cur_time + 5*60
+            if self.last_auths_in(20, cur_time - 3 * 60):
+                logger.debug('C1')
+                return cur_time + 3 * 60
             # If last 10 auths were within 1 minute, slow down to 30 sec
-            if self.last_auths_in(10, cur_time - 30):
+            if self.last_auths_in(10, cur_time - 60):
+                logger.debug('C2')
                 return cur_time + 30
             # If last 2 reauths in 5 seconds:
             if self.last_auths_in(2, cur_time - 5):
+                logger.debug('C3')
                 return cur_time + 2
+
+            logger.debug('C4')
             return last[0] + 1
 
         # World is pingable
         if last[1]:
+            logger.debug('C5')
             return last[0] + self.args.timeout  # last auth OK
+
         else:
-            if self.last_auths_in(20, cur_time - 5 * 60):
-                return cur_time + 5 * 60
+
+            if self.last_auths_in(20, cur_time - 3 * 60):
+                logger.debug('C6')
+                return cur_time + 3 * 60
             if self.last_auths_in(10, cur_time - 30):
+                logger.debug('C7')
                 return cur_time + 30
             if self.last_auths_in(2, cur_time - 5):
+                logger.debug('C8')
                 return cur_time + 2
+
+            logger.debug('C9')
             return last[0] + 5  # last auth failed with exception
 
     def do_auth(self):
