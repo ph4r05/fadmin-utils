@@ -10,7 +10,6 @@ import os
 import logging
 import coloredlogs
 import threading
-from multiping import MultiPing
 from requests.auth import HTTPBasicAuth
 from fadmin.trace_logger import Tracelogger
 from fadmin import shell_ping
@@ -37,6 +36,10 @@ class Login(object):
         self.trace_logger = Tracelogger(logger)
         self.auth_attempts = []
 
+        self.ip_thread = None
+        self.last_ip_check = None
+        self.ip_results = []
+
         self.ping_thread = [None, None]
         self.last_ping_time = [None, None]
         self.result_window = [[], []]
@@ -44,6 +47,51 @@ class Login(object):
         self.monitored = [FADMIN_HOST, MUNI_HOST]
         self.last_connectivity_state = None
         self.last_check = 0
+
+    def ip_main(self):
+        """
+        IP check address
+        :return:
+        """
+        logger.info('IP thread started %s %s %s'
+                    % (os.getpid(), os.getppid(), threading.current_thread()))
+
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    cur_time = time.time()
+                    self.ip_job()
+                    self.last_ip_check = cur_time
+                    time.sleep(2)
+
+                except Exception as e:
+                    logger.error('Exception in IP job: %s' % e)
+                    self.trace_logger.log(e)
+                    time.sleep(5)
+
+        except Exception as e:
+            logger.error('Exception: %s' % e)
+            self.trace_logger.log(e)
+
+        logger.info('IP loop terminated')
+
+    def ip_job(self):
+        """
+        IP resolve
+        :return:
+        """
+        try:
+            res = requests.get('https://api.ipify.org?format=json', timeout=10)
+            res.raise_for_status()
+            js = res.json()
+            self.ip_results.append(js['ip'])
+
+        except Exception as e:
+            logger.info('IP exception: %s' % e)
+            self.trace_logger.log(e)
+            self.ip_results.append(None)
+
+        self.ip_results = self.ip_results[-100:]
 
     def ping_main(self, monitored_host):
         """
@@ -104,6 +152,16 @@ class Login(object):
     def is_world_pingable(self):
         suffix = self.result_window[1][-4:]
         return sum([1 for x in suffix if x is not None]) >= 2
+
+    def is_on_fi_ip(self):
+        if len(self.ip_results) == 0 or self.ip_results[-1] is None:
+            return None
+
+        last = self.ip_results[-1]
+        if not last.startswith('147.251.'):
+            return False
+        parts = last.split('.')
+        return parts[2] in ['42', '43', '44']
 
     def prune_attempts(self, state_changed=False):
         if state_changed:
@@ -230,6 +288,10 @@ class Login(object):
         self.ping_thread[1].setDaemon(True)
         self.ping_thread[1].start()
 
+        self.ip_thread = threading.Thread(target=self.ip_main, args=())
+        self.ip_thread.setDaemon(True)
+        self.ip_thread.start()
+
         self.sess = requests.Session()
 
     def entry(self, args):
@@ -247,6 +309,11 @@ class Login(object):
             # If not on FI network, put into rest
             if not self.is_on_fi():
                 time.sleep(0.5)
+                continue
+
+            # If has non-FI IP continue
+            if self.is_on_fi_ip() == False:
+                time.sleep(0.2)
                 continue
 
             # Main reauth loop.
